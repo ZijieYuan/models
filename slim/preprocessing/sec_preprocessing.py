@@ -31,5 +31,5 @@ def preprocess_image(image, output_height, output_width, is_training):
   image_list = [image]    # initialize image_list; save orig image into image_list
   for ang in angle:
       image_single = tf.contrib.image.rotate(image,angle)
-      image_list.append(image_single)
+      image_list = images.append(image_single)
   return image_list

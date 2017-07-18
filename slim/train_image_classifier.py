@@ -184,6 +184,11 @@ tf.app.flags.DEFINE_string(
     'preprocessing_name', None, 'The name of the preprocessing to use. If left '
     'as `None`, then the model_name flag is used.')
 
+tf.app.flags.DEFINE_string(
+    'sec_preprocessing_name', 'sec_preprocessing', 'The name of the secondary preprocessing to '
+    'use. To create an image list. If left as `None`, then only a single image '
+    'will be used.')
+
 tf.app.flags.DEFINE_integer(
     'batch_size', 32, 'The number of samples in each batch.')
 
@@ -419,6 +424,10 @@ def main(_):
         preprocessing_name,
         is_training=True)
 
+    sec_preprocessing_name = FLAGS.sec_preprocessing_name
+    image_sec_preprocessing_fn = preprocessing_factory.get_preprocessing(
+        sec_preprocessing_name,
+        is_training=True)
     ##############################################################
     # Create a dataset provider that loads data from the dataset #
     ##############################################################
@@ -434,12 +443,15 @@ def main(_):
       train_image_size = FLAGS.train_image_size or network_fn.default_image_size
 
       image = image_preprocessing_fn(image, train_image_size, train_image_size)
+      image_list = image_sec_preprocessing_fn(image, train_image_size, train_image_size)
+      label_list = [label for i in range(len(image_list))]
 
       images, labels = tf.train.batch(
-          [image, label],
+          [image_list, label_list],
           batch_size=FLAGS.batch_size,
           num_threads=FLAGS.num_preprocessing_threads,
-          capacity=5 * FLAGS.batch_size)
+          capacity=5 * FLAGS.batch_size,
+          enqueue_many=True)
       labels = slim.one_hot_encoding(
           labels, dataset.num_classes - FLAGS.labels_offset)
       batch_queue = slim.prefetch_queue.prefetch_queue(
