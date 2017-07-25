@@ -29,7 +29,7 @@ from datasets import dataset_utils
 
 slim = tf.contrib.slim
 
-_FILE_PATTERN = 'spitz_%s-*.tfrecord'
+_FILE_PATTERN = 'spitz'
 
 SPLITS_TO_SIZES = {'train': 1000000, 'validation': 100000}
 
@@ -86,14 +86,15 @@ def get_split(split_name, dataset_dir, file_pattern='spitz_train', reader=None):
     labels_to_names = dataset_utils.read_label_file(dataset_dir)
 
   #Count the total number of examples in all of these shard 
+  
   num_samples = 0
   tfrecords_to_count = [os.path.join(dataset_dir, file) 
     for file in os.listdir(dataset_dir) 
     if file.startswith(file_pattern)]
+
   for tfrecord_file in tfrecords_to_count:
       for record in tf.python_io.tf_record_iterator(tfrecord_file):
           num_samples += 1
-          
   return slim.dataset.Dataset(
       data_sources=tfrecords_to_count,
       reader=reader,
