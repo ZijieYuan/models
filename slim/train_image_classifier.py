@@ -19,6 +19,7 @@ from __future__ import division
 from __future__ import print_function
 
 import tensorflow as tf
+import collections
 
 from datasets import dataset_factory
 from deployment import model_deploy
@@ -119,6 +120,12 @@ tf.app.flags.DEFINE_float(
 
 tf.app.flags.DEFINE_float('rmsprop_decay', 0.9, 'Decay term for RMSProp.')
 
+tf.app.flags.DEFINE_float('depth_multiplier', 1.0, 
+    'Depth multiplier, should be in the range of [0.0,1.0].') 
+
+tf.app.flags.DEFINE_float('dropout_keep_prob', 0.8, 
+    'Dropout, should be in the range of [0.0,1.0].')
+
 #######################
 # Learning Rate Flags #
 #######################
@@ -185,9 +192,9 @@ tf.app.flags.DEFINE_string(
     'as `None`, then the model_name flag is used.')
 
 tf.app.flags.DEFINE_string(
-    'sec_preprocessing_name', 'sec_preprocessing', 'The name of the secondary preprocessing to '
-    'use. To create an image list. If left as `None`, then only a single image '
-    'will be used.')
+    'sec_preprocessing_name', 'sec_preprocessing', 'The name of the secondary '
+    'preprocessing to use. To create an image list. If left as `None`, then only '
+    ' a single image will be used.')
 
 tf.app.flags.DEFINE_integer(
     'batch_size', 32, 'The number of samples in each batch.')
@@ -380,6 +387,65 @@ def _get_variables_to_train():
     variables_to_train.extend(variables)
   return variables_to_train
 
+list_with_multiplier = ['inception_v3']
+list_with_dropout = ['inception_v3']
+def val_exist():
+  """ verify if depth_multiplier and dropout_keep_prob are accepted in the chosen architecture.
+  """    
+  if not FLAGS.model_name in list_with_multiplier:
+        raise ValueError('The chosen architecture is not support "depth_multiplier" parameter.')
+  if not FLAGS.model_name in list_with_dropout:
+        raise ValueError('The chosen architecture is not support "dropout_keep_prob" parameter.')
+  return
+
+def val_range():
+  """ Verify if depth_multiplier value and dropout_keep_prob value are in the range of [0.0,1.0].
+  """
+  if FLAGS.depth_multiplier<0.0 or FLAGS.depth_multiplier>1.0:
+        raise ValueError('The depth_multiplier value should be in the range of [0.0,1.0].')
+  if FLAGS.dropout_keep_prob<0.0 or FLAGS.dropout_keep_prob>1.0:
+        raise ValueError('The dropout_keep_prob value should be in the range of [0.0,1.0].')
+  return
+
+def average_logits(logits, num_child_image, batch_size=FLAGS.batch_size):
+  logits_list = []
+  n = 0
+  while n < batch_size/num_child_image:
+      logits_temp = tf.reduce_mean(logits[n*num_child_image:(n+1)*num_child_image], axis=0, keep_dims=True)
+      logits_list.append(logits_temp)
+      n = n + 1
+  logits = tf.concat(logits_list, 0)
+  return logits
+
+def labels_average_logits(labels, num_child_image, batch_size=FLAGS.batch_size):
+  label_list = []
+  n = 0
+  while n < batch_size/num_child_image:
+      sub_labels = labels[n*num_child_image:(n+1)*num_child_image]
+      label_single = tf.reduce_mean(sub_labels,axis=0,keep_dims=True)
+      label_list.append(label_single)
+      n = n + 1
+  labels = tf.concat(label_list, 0)
+  return labels
+#############################################
+"""
+ #### verify all elements in the sub_labels are all the same.
+  #    counter_sub_labels = collections.Counter(sub_labels) ###### NOT work for tf
+  #    label_single = counter_sub_labels.keys()
+  #    if not len(label_single) == 1:
+  #        raise ValueError('Labels are mismatched. Check the labels in "pre_processing()"')
+      label_max = tf.reduce_max(sub_labels,axis=0,keep_dims=True)
+      label_min = tf.reduce_min(sub_labels,axis=0,keep_dims=True)
+      if_equal = tf.equal(label_max,label_min,name=None)
+      print('tf.cast(if_equal,float") is ',tf.cast(if_equal,'float'))
+      print('tf.equal(label_max,label_min,name=None) is ',if_equal)
+      def if_true():
+          pass
+      def if_false():
+          print(label_max,label_min)
+          raise ValueError('Labels are mismatched. The labels of child images should be all the same. Check the labels in "pre_processing()"')
+      equal_true_false = tf.cond(if_equal,if_true,if_false)
+"""
 
 def main(_):
   if not FLAGS.dataset_dir:
@@ -410,11 +476,15 @@ def main(_):
     ######################
     # Select the network #
     ######################
+    val_exist()
+    val_range()
     network_fn = nets_factory.get_network_fn(
         FLAGS.model_name,
         num_classes=(dataset.num_classes - FLAGS.labels_offset),
         weight_decay=FLAGS.weight_decay,
-        is_training=True)
+        is_training=True,
+        depth_multiplier=FLAGS.depth_multiplier,
+        dropout_keep_prob=FLAGS.dropout_keep_prob)
 
     #####################################
     # Select the preprocessing function #
@@ -441,10 +511,10 @@ def main(_):
       label -= FLAGS.labels_offset
 
       train_image_size = FLAGS.train_image_size or network_fn.default_image_size
-
+      DA_flag = 0
       image = image_preprocessing_fn(image, train_image_size, train_image_size)
-      image_list = image_sec_preprocessing_fn(image, train_image_size, train_image_size)
-      label_list = [label for i in range(len(image_list))]
+      image_list, num_child_image, DA_flag = image_sec_preprocessing_fn(image, train_image_size, train_image_size)
+      label_list = [label for i in range(num_child_image)]
 
       images, labels = tf.train.batch(
           [image_list, label_list],
@@ -456,7 +526,7 @@ def main(_):
           labels, dataset.num_classes - FLAGS.labels_offset)
       batch_queue = slim.prefetch_queue.prefetch_queue(
           [images, labels], capacity=2 * deploy_config.num_clones)
-
+   
     ####################
     # Define the model #
     ####################
@@ -464,13 +534,25 @@ def main(_):
       """Allows data parallelism by creating multiple clones of network_fn."""
       images, labels = batch_queue.dequeue()
       logits, end_points = network_fn(images)
+      AuxLogits = end_points['AuxLogits']
+   #   for i in end_points:
+   #       print(i)
+
+    # Verify if data argumentation has been implemented, if true, then average the logits and reduce the size of labels.   
+      if DA_flag == 1:
+        logits = average_logits(logits, num_child_image)
+        AuxLogits = average_logits(AuxLogits, num_child_image)
+        labels = labels_average_logits(labels, num_child_image)
+   #   print('logits after averaging is ',logits)
+   #   print('labels that match to averaged logits is', labels)
+   #   print('end_points is ', end_points)
 
       #############################
       # Specify the loss function #
       #############################
       if 'AuxLogits' in end_points:
         tf.losses.softmax_cross_entropy(
-            logits=end_points['AuxLogits'], onehot_labels=labels,
+            logits=AuxLogits, onehot_labels=labels,
             label_smoothing=FLAGS.label_smoothing, weights=0.4, scope='aux_loss')
       tf.losses.softmax_cross_entropy(
           logits=logits, onehot_labels=labels,
@@ -511,6 +593,9 @@ def main(_):
           FLAGS.moving_average_decay, global_step)
     else:
       moving_average_variables, variable_averages = None, None
+
+
+
 
     #########################################
     # Configure the optimization procedure. #
